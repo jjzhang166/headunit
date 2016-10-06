@@ -3,7 +3,6 @@
 
 #include <QMainWindow>
 #include <QPoint>
-#include <headunitworker.h>
 #include <iostream>
 #include "headunit/hu_gst.h"
 #include "clickablevideowidget.h"
