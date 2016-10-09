@@ -18,7 +18,7 @@ This should install all the files required to get started with developing QT, bu
 
 Install the following packages:
 
-    libgstreamer1.0-dev gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad gstreamer1.0-libav libboost-dev
+    libgstreamer1.0-dev gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad gstreamer1.0-libav libboost-dev libgstreamer-plugins-base1.0-dev 
 
 **Build and install QtGStreamer**
 
@@ -29,6 +29,7 @@ Get the latest code for QtGStreamer from https://cgit.freedesktop.org/gstreamer/
 With the cmake gui installed just open the folder where you've cloned the qt-gstreamer git, specify where you want to build it (I just used the same dir as it makes generating the Doxygen document easier) and click generate (if it throws up an error message just correct it). You will need tell cmake to use QT5:
 
     -DQT_VERSION=5
+    -CMAKE_CXX_FLAGS=-std=c++11
    After succesfully generating the make file with cmake just open the terminal and cd into the folder you specified as build directory in and run: `make && sudo make install`
 
 After completing the above steps you should be able to build the code with QT Creator an run it. If you have any problem, then reach out to me on XDA Developers (http://forum.xda-developers.com/member.php?u=6642908).
