@@ -1,20 +1,22 @@
 HeadUnit-Desktop
 ================
 
-
 ----------
 
-
 I use this repository to develop and test the C code from Mike Reid's Headunit for Android Auto. My plan is to create a highly portable car head unit using QT5. By highly portable I mean that it will eventually be able to run on most Linux distros and Windows (sorry Mac users, but I don't plan to even get near a Mac anytime soon). I currently develop on Ubuntu and Debian, I have already tested it on Windows 10 and you could get it running by changing some bits and linking against all the libraries manually.
-
 
 ----------
 How to get the code working?
 ----------------------------
+
 Install QT5 and you will probably want to install QT Creator with it as well. You can get it with apt-get:
 
     sudo apt-get install qtcreator
+
 This should install all the files required to get started with developing QT, but it is very likely, that you will get an outdated version of it so get it from the official site https://www.qt.io/download-open-source
+After you've installed Qt add its libraries to the library load path. On Ubuntu/Debian x64 just add the following line to /etc/ld.so.conf/x86_64-linux-gnu.conf :
+
+    /home/YOUR_USERNAME/Qt/5.7/gcc_64/lib
 
 Install the following packages:
 
