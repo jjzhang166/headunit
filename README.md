@@ -18,7 +18,7 @@ This should install all the files required to get started with developing QT, bu
 
 Install the following packages:
 
-    libgstreamer1.0-dev gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad gstreamer1.0-libav libboost-dev libgstreamer-plugins-base1.0-dev 
+    libusb-1.0-0-dev libssl-dev libgstreamer1.0-dev gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad gstreamer1.0-libav libboost-dev libgstreamer-plugins-base1.0-dev 
 
 **Build and install QtGStreamer**
 
@@ -34,4 +34,4 @@ With the cmake gui installed just open the folder where you've cloned the qt-gst
 
 After completing the above steps you should be able to build the code with QT Creator an run it. If you have any problem, then reach out to me on XDA Developers (http://forum.xda-developers.com/member.php?u=6642908).
 
-The code here is formatted with QT's Clang Code Model plugin, so please respect that :)
+The code here is formatted with QT's clang-format, using the LLVM format, so please respect that :)

@@ -1070,7 +1070,9 @@ int hu_aap_stop() { // Sends Byebye, then stops Transport/USBACC/OAP
 
   return (ret);
 }
-
+/*
+ *
+ */
 int hu_aap_start(byte ep_in_addr, byte ep_out_addr, long myip_string,
                  int transport_audio,
                  int hr) { // Starts Transport/USBACC/OAP, then AA protocol w/

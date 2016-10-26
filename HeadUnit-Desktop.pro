@@ -4,7 +4,7 @@
 #
 #-------------------------------------------------
 
-QT       += core gui
+QT       += core gui multimedia
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -44,6 +44,7 @@ unix: LIBS += -lssl
 unix: LIBS += -lusb-1.0
 unix: LIBS += -lglib-2.0
 unix: LIBS += -lgobject-2.0
+unix: LIBS += -lgstapp-1.0
 unix: LIBS += -lgstreamer-1.0
 unix: LIBS += -lgstapp-1.0
 unix: LIBS += -lQt5GLib-2.0
@@ -79,6 +80,7 @@ win32: DEPENDPATH += $$PWD/bin/dll
 
 INCLUDEPATH += $$PWD/../../../usr/local/include
 DEPENDPATH += $$PWD/../../../usr/local/include
+
 
 
 

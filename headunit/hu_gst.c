@@ -4,10 +4,6 @@ int nightmode = 0;
 int displayStatus = 1;
 int mic_change_state = 0;
 
-GstElement *mic_pipeline, *mic_sink;
-GstElement *aud_pipeline, *aud_src;
-GstElement *au1_pipeline, *au1_src;
-
 GAsyncQueue *sendqueue;
 
 GMainLoop *mainloop;
@@ -18,6 +14,11 @@ void queueSend(int retry, int chan, unsigned char *cmd_buf, int cmd_len,
                int shouldFree) {
   send_arg *cmd = malloc(sizeof(send_arg));
 
+  if (chan == AA_CH_MIC)
+    g_print("sent mic buffer length:%d\n"
+            "-----------------------------------------------------------\n",
+            (int)sizeof(cmd_buf));
+
   cmd->retry = retry;
   cmd->chan = chan;
   cmd->cmd_buf = cmd_buf;
@@ -27,29 +28,65 @@ void queueSend(int retry, int chan, unsigned char *cmd_buf, int cmd_len,
   g_async_queue_push(sendqueue, cmd);
 }
 
-int timestamp = 0, tried = 0, frames_pushed = 0;
-double elapsedTime = 0;
+static GstFlowReturn read_mic_data(GstElement *sink) {
 
+  GstSample *sample;
+  GstBuffer *buffer;
+  int ret, idx;
+  struct timespec tp;
+
+  sample = gst_app_sink_pull_sample((GstAppSink *)sink);
+  buffer = gst_sample_get_buffer(sample);
+
+  if (buffer) {
+
+    /* if mic is stopped, don't bother sending */
+
+    if (mic_change_state == 0) {
+      printf("Mic stopped.. dropping buffers \n");
+      gst_buffer_unref(buffer);
+      return GST_FLOW_OK;
+    }
+
+    /* Copy PCM Audio Data */
+
+    GstMapInfo mapInfo;
+    if (gst_buffer_map(buffer, &mapInfo, GST_MAP_READ)) {
+
+      /* Fetch the time stamp */
+      clock_gettime(CLOCK_REALTIME, &tp);
+
+      int buffer_size = gst_buffer_get_size(buffer);
+      if (buffer_size <= 64) {
+        printf("Mic data < 64 \n");
+        return GST_FLOW_OK;
+      }
+
+      uint8_t *mic_buffer = (uint8_t *)malloc(14 + buffer_size);
+
+      /* Copy header */
+      memcpy(mic_buffer, mic_header, sizeof(mic_header));
+
+      idx = sizeof(mic_header) + uptime_encode(tp.tv_nsec * 0.001, mic_buffer);
+
+      memcpy(mic_buffer + idx, mapInfo.data, buffer_size);
+      idx += buffer_size;
+
+      queueSend(1, AA_CH_MIC, mic_buffer, idx, TRUE);
+      gst_buffer_unmap(buffer, &mapInfo);
+      // gst_buffer_unref(buffer);
+    }
+
+    return GST_FLOW_OK;
+  }
+}
 static gboolean read_data(gst_app_t *app) {
   GstBuffer *buffer;
-  guint8 *ptr;
   GstFlowReturn ret;
   int iret;
   char *vbuf;
   char *abuf;
   int res_len = 0;
-
-  struct timespec t1, t2;
-
-  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t1);
-
-  int timenow = (int)time(NULL);
-
-  tried++;
-  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t2);
-  elapsedTime += ((double)(t2.tv_sec - t1.tv_sec) * 1.0e9 +
-                  (double)(t2.tv_nsec - t1.tv_nsec)) /
-                 1000000000;
 
   iret = hu_aap_recv_process();
 
@@ -63,8 +100,6 @@ static gboolean read_data(gst_app_t *app) {
   vbuf = vid_read_head_buf_get(&res_len);
 
   if (vbuf != NULL) {
-    frames_pushed++;
-
     buffer = gst_buffer_new_and_alloc(res_len);
     gst_buffer_fill(buffer, 0, vbuf, res_len);
 
@@ -75,23 +110,26 @@ static gboolean read_data(gst_app_t *app) {
       return FALSE;
     }
   }
-  if (timenow != timestamp) {
-    g_print(
-        "%d: %d FPS (tried %d times) | receive and push time : %lf seconds\n",
-        timestamp, frames_pushed, tried, elapsedTime);
-    timestamp = timenow;
-    frames_pushed = 0;
-    tried = 0;
-    elapsedTime = 0;
+
+  /* Is there an audio buffer queued? */
+  abuf = aud_read_head_buf_get(&res_len);
+  if (abuf != NULL) {
+    buffer = gst_buffer_new_and_alloc(res_len);
+    gst_buffer_fill(buffer, 0, abuf, res_len);
+
+    if (res_len <= 2048 + 96)
+      ret = gst_app_src_push_buffer((GstAppSrc *)app->voicesrc, buffer);
+    else
+      ret = gst_app_src_push_buffer((GstAppSrc *)app->musicsrc, buffer);
+
+    if (ret != GST_FLOW_OK) {
+      g_print("push buffer returned %d for %d bytes \n", ret, res_len);
+      return FALSE;
+    }
   }
+
   return TRUE;
 }
-
-static void start_feed(GstElement *pipeline, guint size, void *app) {
-  shouldRead = TRUE;
-}
-
-static void stop_feed(GstElement *pipeline, void *app) { shouldRead = FALSE; }
 
 static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer *ptr) {
   gst_app_t *app = (gst_app_t *)ptr;
@@ -148,23 +186,12 @@ static int gst_pipeline_init(gst_app_t *app, void *widget) {
   GError *error = NULL;
 
   gst_init(NULL, NULL);
-
-  //	app->pipeline = (GstPipeline*)gst_parse_launch("appsrc name=mysrc
-  // is-live=true block=false max-latency=1000000 ! h264parse ! vpudec
-  // low-latency=true framedrop=true framedrop-level-mask=0x200 ! mfw_v4lsink
-  // max-lateness=1000000000 sync=false async=false", &error);
-
-  // app->pipeline = (GstPipeline*)gst_parse_launch("appsrc name=mysrc
-  // is-live=true block=false max-latency=1000000 ! h264parse ! vpudec
-  // low-latency=true framedrop=true framedrop-level-mask=0x200 ! mfw_isink
-  // name=mysink axis-left=25 axis-top=0 disp-width=751 disp-height=480
-  // max-lateness=1000000000 sync=false async=false", &error);
   app->pipeline = (GstPipeline *)gst_parse_launch(
       "appsrc name=mysrc is-live=true block=false max-latency=-1 "
-      "blocksize=262144 do-timestamp=true max-bytes=262144 "
+      "blocksize=262144 do-timestamp=true "
       "stream-type=stream typefind=true ! "
       "h264parse ! "
-      "avdec_h264 lowres=2 output-corrupt=false ! "
+      "avdec_h264 ! "
       "videoconvert name=videoconvert ! "
       "qwidget5videosink name=mysink sync=false async=false "
       "max-lateness=1000000 blocksize=262144",
@@ -188,13 +215,61 @@ static int gst_pipeline_init(gst_app_t *app, void *widget) {
 
   gst_app_src_set_stream_type(app->src, GST_APP_STREAM_TYPE_STREAM);
 
-  g_signal_connect(app->src, "need-data", G_CALLBACK(start_feed), app);
+  app->musicpipeline = (GstPipeline *)gst_parse_launch(
+      "appsrc name=musicsrc is-live=true block=false blocksize=8192 ! "
+      "audio/x-raw, signed=true, endianness=1234, "
+      "depth=16, width=16, rate=48000, channels=2, format=S16LE ! "
+      "alsasink",
+      &error);
+  if (error != NULL) {
+    printf("could not construct pipeline: %s\n", error->message);
+    g_clear_error(&error);
+    return -1;
+  }
 
-  g_signal_connect(app->src, "enough-data", G_CALLBACK(stop_feed), app);
+  app->musicsrc =
+      (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->musicpipeline), "musicsrc");
+
+  gst_app_src_set_stream_type(app->musicsrc, GST_APP_STREAM_TYPE_STREAM);
+
+  app->voicepipeline = (GstPipeline *)gst_parse_launch(
+      "appsrc name=voicesrc is-live=true block=false max-latency=1000000 ! "
+      "audio/x-raw, signed=true, endianness=1234, "
+      "depth=16, width=16, rate=16000, channels=1, format=S16LE ! "
+      "alsasink",
+      &error);
+
+  if (error != NULL) {
+    printf("could not construct pipeline: %s\n", error->message);
+    g_clear_error(&error);
+    return -1;
+  }
+
+  app->voicesrc =
+      (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->voicepipeline), "voicesrc");
+
+  gst_app_src_set_stream_type(app->voicesrc, GST_APP_STREAM_TYPE_STREAM);
+
+  app->micpipeline = (GstPipeline *)gst_parse_launch(
+      "alsasrc name=micsrc ! audioconvert ! audio/x-raw, signed=true, "
+      "endianness=1234, depth=16, width=16, channels=1, rate=16000 ! queue ! "
+      "appsink name=micsink async=false emit-signals=true blocksize=8192",
+      &error);
+
+  if (error != NULL) {
+    printf("could not construct mic pipeline: %s\n", error->message);
+    g_clear_error(&error);
+    return -1;
+  }
+
+  app->micsink = gst_bin_get_by_name(GST_BIN(app->micpipeline), "micsink");
+
+  g_object_set(G_OBJECT(app->micsink), "throttle-time", 3000000, NULL);
+
+  g_signal_connect(app->micsink, "new-sample", G_CALLBACK(read_mic_data), NULL);
 
   return 0;
 }
-
 static size_t uleb128_encode(uint64_t value, uint8_t *data) {
   uint8_t cbyte;
   size_t enc_size = 0;
@@ -290,6 +365,8 @@ void aa_touch_event(uint8_t action, int x, int y) {
   queueSend(0, AA_CH_TOU, buf, idx, TRUE);
 }
 
+gboolean touch_poll_event(gpointer data) { return TRUE; }
+
 static size_t uptime_encode(uint64_t value, uint8_t *data) {
 
   int ctr = 0;
@@ -299,56 +376,6 @@ static size_t uptime_encode(uint64_t value, uint8_t *data) {
   }
 
   return 8;
-}
-
-static void read_mic_data(GstElement *sink) {
-  GstBuffer *gstbuf;
-  int ret;
-
-  g_signal_emit_by_name(sink, "pull-buffer", &gstbuf, NULL);
-
-  if (gstbuf) {
-
-    struct timespec tp;
-
-    /* if mic is stopped, don't bother sending */
-
-    if (mic_change_state == 0) {
-      g_print("Mic stopped.. dropping buffers \n");
-      gst_buffer_unref(gstbuf);
-      return;
-    }
-
-    /* Fetch the time stamp */
-    clock_gettime(CLOCK_REALTIME, &tp);
-
-    gint mic_buf_sz;
-    mic_buf_sz = gst_buffer_get_size(gstbuf);
-
-    int idx;
-
-    if (mic_buf_sz <= 64) {
-      g_print("Mic data < 64 \n");
-      return;
-    }
-
-    uint8_t *mic_buffer = (uint8_t *)malloc(14 + mic_buf_sz);
-
-    /* Copy header */
-    memcpy(mic_buffer, mic_header, sizeof(mic_header));
-
-    idx = sizeof(mic_header) + uptime_encode(tp.tv_nsec * 0.001, mic_buffer);
-
-    /* Copy PCM Audio Data */
-
-    gst_buffer_fill(mic_buffer + idx, 0, gstbuf, mic_buf_sz);
-    // memcpy(mic_buffer+idx, GST_BUFFER_DATA(gstbuf), mic_buf_sz);
-    idx += mic_buf_sz;
-
-    queueSend(1, AA_CH_MIC, mic_buffer, idx, TRUE);
-
-    gst_buffer_unref(gstbuf);
-  }
 }
 
 static int hu_fill_button_message(uint8_t *buffer, uint64_t timeStamp,
@@ -477,9 +504,7 @@ static void handle_button_press(int keycode) {
 }
 
 gboolean myMainLoop(gpointer app) {
-  if (shouldRead) {
-    read_data(app);
-  }
+  read_data((gst_app_t *)app);
 
   send_arg *cmd;
 
@@ -488,6 +513,20 @@ gboolean myMainLoop(gpointer app) {
     if (cmd->shouldFree)
       free(cmd->cmd_buf);
     free(cmd);
+  }
+
+  int mic_ret = hu_aap_mic_get();
+
+  if (mic_change_state == 0 && mic_ret == 2) {
+    g_print("Mic Started\n");
+    mic_change_state = 2;
+    gst_element_set_state((GstElement *)gst_app.micpipeline, GST_STATE_PLAYING);
+  }
+
+  if (mic_change_state == 2 && mic_ret == 1) {
+    g_print("Mic Stopped\n");
+    mic_change_state = 0;
+    gst_element_set_state((GstElement *)gst_app.micpipeline, GST_STATE_READY);
   }
 
   return TRUE;
@@ -506,33 +545,26 @@ static int gst_loop(gst_app_t *app) {
   int ret;
   GstStateChangeReturn state_ret;
 
-  state_ret =
-      gst_element_set_state((GstElement *)app->pipeline, GST_STATE_PLAYING);
-  state_ret =
-      gst_element_set_state((GstElement *)aud_pipeline, GST_STATE_PLAYING);
-  state_ret =
-      gst_element_set_state((GstElement *)au1_pipeline, GST_STATE_PLAYING);
-
-  //	g_warning("set state returned %d\n", state_ret);
+  gst_element_set_state((GstElement *)app->pipeline, GST_STATE_PLAYING);
+  gst_element_set_state((GstElement *)app->musicpipeline, GST_STATE_PLAYING);
+  gst_element_set_state((GstElement *)app->voicepipeline, GST_STATE_PLAYING);
+  gst_element_set_state((GstElement *)app->micpipeline, GST_STATE_READY);
 
   app->loop = g_main_loop_new(NULL, FALSE);
 
   mainloop = app->loop;
 
-  //	g_timeout_add_full(G_PRIORITY_HIGH, 1, myMainLoop, (gpointer)app, NULL);
-
   g_print("Starting Android Auto...\n");
   g_main_loop_run(app->loop);
 
-  // TO-DO
-  state_ret =
-      gst_element_set_state((GstElement *)app->pipeline, GST_STATE_NULL);
-  //	g_warning("set state null returned %d\n", state_ret);
+  gst_element_set_state((GstElement *)app->pipeline, GST_STATE_NULL);
+  gst_element_set_state((GstElement *)app->musicpipeline, GST_STATE_NULL);
+  gst_element_set_state((GstElement *)app->voicepipeline, GST_STATE_NULL);
 
   gst_object_unref(app->pipeline);
-  gst_object_unref(mic_pipeline);
-  gst_object_unref(aud_pipeline);
-  gst_object_unref(au1_pipeline);
+  gst_object_unref(app->micpipeline);
+  gst_object_unref(app->musicpipeline);
+  gst_object_unref(app->voicepipeline);
 
   return ret;
 }
@@ -554,11 +586,11 @@ int aa_gst(void *widget) {
   byte ep_out_addr = -2;
 
   /* Start AA processing */
-  ret = hu_aap_start(ep_in_addr, ep_out_addr, 2050074816, 0, 0);
+  ret = hu_aap_start(ep_in_addr, ep_out_addr, 2050074816, 1, 0);
   if (ret == -1) {
     g_print("Phone switched to accessory mode. Attempting once more.\n");
     sleep(1);
-    ret = hu_aap_start(ep_in_addr, ep_out_addr, 2050074816, 0, 0);
+    ret = hu_aap_start(ep_in_addr, ep_out_addr, 2050074816, 1, 0);
   }
 
   if (ret < 0) {

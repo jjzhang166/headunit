@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
 #include <linux/input.h>
 #include <time.h>
 #include <signal.h>
@@ -31,12 +32,15 @@ __asm__(".symver realpath1,realpath1@GLIBC_2.11.1");
 typedef struct {
   GMainLoop *loop;
   GstPipeline *pipeline;
+  GstPipeline *musicpipeline;
+  GstPipeline *voicepipeline;
+  GstPipeline *micpipeline;
+  GstElement *audio;
   GstAppSrc *src;
+  GstAppSrc *musicsrc;
+  GstAppSrc *voicesrc;
   GstElement *sink;
-  GstElement *decoder;
-  GstElement *queue;
-  GstElement *convert;
-  GstElement *videoconvert;
+  GstElement *micsink;
   guint sourceid;
 } gst_app_t;
 
@@ -85,21 +89,22 @@ static const uint8_t mic_header[] = {0x00, 0x00};
 static const int max_size = 8192;
 
 static int shouldRead = FALSE;
+static int shouldReadAudio = FALSE;
 static gst_app_t gst_app;
 
 void queueSend(int retry, int chan, unsigned char *cmd_buf, int cmd_len,
                int shouldFree);
 
-static void read_mic_data(GstElement *sink);
+static GstFlowReturn read_mic_data(GstElement *sink);
 static gboolean read_data(gst_app_t *app);
 static void start_feed(GstElement *pipeline, guint size, void *app);
 static void stop_feed(GstElement *pipeline, void *app);
 static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer *ptr);
 static int gst_pipeline_init(gst_app_t *app, void *widget);
+static int gst_audio_init(gst_app_t *app);
 static size_t uleb128_encode(uint64_t value, uint8_t *data);
 static size_t varint_encode(uint64_t val, uint8_t *ba, int idx);
 static size_t uptime_encode(uint64_t value, uint8_t *data);
-static void read_mic_data(GstElement *sink);
 static gboolean delayedShouldDisplayTrue(gpointer data);
 static int hu_fill_button_message(uint8_t *buffer, uint64_t timeStamp,
                                   HU_INPUT_BUTTON button, int isPress);
