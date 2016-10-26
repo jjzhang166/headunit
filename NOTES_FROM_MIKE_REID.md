@@ -35,7 +35,7 @@ I have 30 years of professional experience in electronics and computing. I have 
 
 I'm not too experienced with Git and open source so please excuse related idiosyncracies.
 
-Feel free to share any thoughts to mikereidis@gmail.com or on my Headunit thread on XDA forum: forum.xda-developers.com/general/paid-software/android-4-1-headunit-android-auto-t3125252/
+Feel free to share any thoughts to mikereidis@gmail.com or on my Headunit thread on XDA forum: https://forum.xda-developers.com/general/paid-software/android-4-1-headunit-android-auto-t3125252/
 
 Thanks ! :)
 Mike Reid.
