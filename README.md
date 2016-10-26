@@ -6,6 +6,16 @@ HeadUnit-Desktop
 I use this repository to develop and test the C code from Mike Reid's Headunit for Android Auto. My plan is to create a highly portable car head unit using QT5. By highly portable I mean that it will eventually be able to run on most Linux distros and Windows (sorry Mac users, but I don't plan to even get near a Mac anytime soon). I currently develop on Ubuntu and Debian, I have already tested it on Windows 10 and you could get it running by changing some bits and linking against all the libraries manually.
 
 ----------
+What is this?
+----------------------------
+Please see the video below for the software in operation (there is audio, but it is not recorded on the video).
+
+
+[![A video of the software running](https://img.youtube.com/vi/LhzlXSiABTI/0.jpg)](https://www.youtube.com/watch?v=LhzlXSiABTI)
+
+*Click on the image to open the video.*
+
+----------
 How to get the code working?
 ----------------------------
 
