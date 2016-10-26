@@ -3,7 +3,7 @@ HeadUnit-Desktop
 
 ----------
 
-I use this repository to develop and test the C code from Mike Reid's Headunit for Android Auto. My plan is to create a highly portable car head unit using QT5. By highly portable I mean that it will eventually be able to run on most Linux distros and Windows (sorry Mac users, but I don't plan to even get near a Mac anytime soon). I currently develop on Ubuntu and Debian, I have already tested it on Windows 10 and you could get it running by changing some bits and linking against all the libraries manually.
+I use this repository to develop and test the C code from Mike Reid's Headunit for Android Auto <sup>tm</sup>. My plan is to create a highly portable car head unit using QT5. By highly portable I mean that it will eventually be able to run on most Linux distros and Windows (sorry Mac users, but I don't plan to even get near a Mac anytime soon). I currently develop on Ubuntu and Debian, I have already tested it on Windows 10 and you could get it running by changing some bits and linking against all the libraries manually.
 
 ----------
 What is this?
@@ -47,3 +47,6 @@ With the cmake gui installed just open the folder where you've cloned the qt-gst
 After completing the above steps you should be able to build the code with QT Creator an run it. If you have any problem, then reach out to me on XDA Developers (http://forum.xda-developers.com/member.php?u=6642908).
 
 The code here is formatted with QT's clang-format, using the LLVM format, so please respect that :)
+
+----------
+Android and Android Auto is a trademark of Google Inc.
