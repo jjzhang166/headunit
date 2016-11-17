@@ -159,62 +159,21 @@ int ihu_tra_start(byte ep_in_addr, byte ep_out_addr, long myip_string,
     return (-1);
 }
 
-int hu_aap_tra_set(int chan, int flags, int type, byte *buf,
-                   int len) { // Convenience function sets up 6 byte Transport
-                              // header: chan, flags, len, type
-
-  buf[0] = (byte)chan; // Encode channel and flags
-  buf[1] = (byte)flags;
-  buf[2] = (len - 4) / 256; // Encode length of following data:
-  buf[3] = (len - 4) % 256;
-  if (type >= 0) { // If type not negative, which indicates encrypted type
-                   // should not be touched...
-    buf[4] = type / 256;
-    buf[5] = type % 256; // Encode msg_type
+int hu_aap_out_get(int chan) {
+  int state = 0;
+  if (chan == AA_CH_AUD) {
+    state = out_state_aud; // Get current audio output state change
+    out_state_aud = -1;    // Reset audio output state change indication
+  } else if (chan == AA_CH_AU1) {
+    state = out_state_au1; // Get current audio output state change
+    out_state_au1 = -1;    // Reset audio output state change indication
+  } else if (chan == AA_CH_AU2) {
+    state = out_state_au2; // Get current audio output state change
+    out_state_au2 = -1;    // Reset audio output state change indication
   }
-
-  return (len);
+  return (state); // Return what the new state was before reset
 }
 
-int hu_aap_tra_recv(byte *buf, int len, int tmo) {
-  int ret = 0;
-  if (iaap_state != hu_STATE_STARTED &&
-      iaap_state != hu_STATE_STARTIN) { // Need to recv when starting
-    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-    return (-1);
-  }
-  ret = ihu_tra_recv(buf, len, tmo);
-  /* if (ret < 0) {
-    loge ("ihu_tra_recv() error so stop Transport & AAP  ret: %d", ret);
-    hu_aap_stop ();
-  }
-  return (ret);*/
-  return ret;
-}
-// NOTE: Added gartnera's changes
-int hu_aap_tra_send(int retry, byte *buf, int len,
-                    int tmo) { // Send Transport data: chan,flags,len,type,...
-  // Need to send when starting
-  if (iaap_state != hu_STATE_STARTED && iaap_state != hu_STATE_STARTIN) {
-    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-    return (-1);
-  }
-
-  int ret = ihu_tra_send(buf, len, tmo);
-  if (ret < 0 || ret != len) {
-    if (retry == 0) {
-      loge("Error ihu_tra_send() error so stop Transport & AAP  ret: %d  len: "
-           "%d",
-           ret, len);
-      hu_aap_stop();
-    }
-    return (-1);
-  }
-
-  if (ena_log_verbo && ena_log_aap_send)
-    logd("OK ihu_tra_send() ret: %d  len: %d", ret, len);
-  return (ret);
-}
 // NOTE: Added gartnera's changes
 int hu_aap_enc_send(int retry, int chan, byte *buf,
                     int len) { // Encrypt data and send: type,...
@@ -288,6 +247,670 @@ flags);  // "S 1 VID B"
   return (0);
 }
 
+
+int hu_aap_mic_get() {
+  int ret_status = mic_change_status; // Get current mic change status
+  if (mic_change_status == 2 || mic_change_status == 1) { // If start or stop...
+    mic_change_status = 0; // Reset mic change status to "No Change"
+  }
+  return (ret_status); // Return original mic change status
+}
+
+//  Process 1 encrypted "receive message set":
+// - Read encrypted message from Transport
+// - Process/react to decrypted message by sending responses etc.
+/*
+        Tricky issues:
+
+          - Read() may return less than a full packet.
+              USB is somewhat "packet oriented" once I raised
+   DEFBUF/sizeof(rx_buf) from 16K to 64K (Maximum video fragment size)
+              But TCP is more stream oriented.
+              Looking at DHU I have increased the buffer even further to 128Kb
+   (current value used in DHU) - Emil
+
+          - Read() may contain multiple packets, returning all or the end of one
+   packet, plus all or the beginning of the next packet.
+              So far I have only seen 2 complete packets in one read().
+
+          - Read() may return all or part of video stream data fragments.
+   Multiple fragments need to be re-assembled before H.264 video processing.
+            Fragments may be up to 64K - 256 in size. Maximum re-assembled video
+   packet seen is around 150K; using 256K re-assembly buffer at present.
+
+
+*/
+
+int hu_aap_recv_process() { //
+  // Terminate unless started or starting (we need to process when starting)
+  if (iaap_state != hu_STATE_STARTED && iaap_state != hu_STATE_STARTIN) {
+    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+    return (-1);
+  }
+
+  byte *buf = rx_buf;
+  byte *temp_buf;
+  int ret = 0;
+  errno = 0;
+  // int min_size_hdr = 6;
+  int rx_len = sizeof(rx_buf);
+  // if (transport_type == 2)                                            // If
+  // wifi...
+  //  rx_len = min_size_hdr;                                           // Just
+  //  get the header
+
+  int have_len = 0; // Length remaining to process for all sub-packets plus 4/8
+                    // byte headers
+
+  have_len = hu_aap_tra_recv(rx_buf, rx_len,
+                             iaap_tra_recv_tmo); // Get Rx packet from Transport
+
+  if (have_len == 0) { // If no data, then done w/ no data
+    return (0);
+  }
+
+  while (have_len >
+         0) { // While length remaining to process,... Process Rx packet:
+    if (ena_log_verbo) {
+      logd("Recv while (have_len > 0): %d", have_len);
+#ifndef NDEBUG
+      hex_dump((char *)"LR: ", 16, buf, have_len);
+#endif
+    }
+    int chan = (int)buf[0]; // Channel
+    int flags = buf[1];     // Flags
+
+    int enc_len = (int)buf[3]; // Encoded length of bytes to be decrypted (minus
+                               // 4/8 byte headers)
+    enc_len += ((int)buf[2] * 256);
+
+    int msg_type = (int)buf[5]; // Message Type (or post handshake, mostly
+                                // indicator of SSL encrypted data)
+    msg_type += ((int)buf[4] * 256);
+
+    have_len -= 4; // Length starting at byte 4: Unencrypted Message Type or
+                   // Encrypted data start
+    buf += 4;      // buf points to data to be decrypted
+    if (flags & 0x08 != 0x08) {
+      loge("NOT ENCRYPTED !!!!!!!!! have_len: %d  enc_len: %d  buf: %p  chan: "
+           "%d %s  flags: 0x%x  msg_type: %d",
+           have_len, enc_len, buf, chan, chan_get(chan), flags, msg_type);
+      hu_aap_stop();
+      return (-1);
+    }
+    if (chan == AA_CH_VID &&
+        flags == 9) { // If First fragment Video... (Packet is encrypted so we
+                      // can't get the real msg_type or check for 0, 0, 0, 1)
+      int total_size = (int)buf[3];
+      total_size += ((int)buf[2] * 256);
+      total_size += ((int)buf[1] * 256 * 256);
+      total_size += ((int)buf[0] * 256 * 256 * 256);
+
+      if (total_size > max_assy_size) // If new  max_assy_size... (total_size
+                                      // seen as big as 151 Kbytes)
+        max_assy_size = total_size;   // Set new max_assy_size      See:
+                                      // jni/hu_aap.c:  byte assy [65536 * 16] =
+                                      // {0}; // up to 1 megabyte
+      //                               & jni/hu_uti.c:  #define
+      //                               vid_buf_BUFS_SIZE    65536 * 4
+      // Up to 256 Kbytes// & src/ca/yyx/hu/hu_tro.java:    byte [] assy = new
+      // byte [65536 * 16];
+      // & src/ca/yyx/hu/hu_tra.java:      res_buf = new byte [65536 * 4];
+      if (total_size > 160 * 1024)
+        logw("First fragment total_size: %d  max_assy_size: %d", total_size,
+             max_assy_size);
+      else
+        logv("First fragment total_size: %d  max_assy_size: %d", total_size,
+             max_assy_size);
+      have_len -= 4; // Remove 4 length bytes inserted into first video fragment
+      buf += 4;
+    }
+
+    if (have_len < enc_len) { // If we need more data for the full packet...
+      int need_len = enc_len - have_len;
+      memmove(rx_buf, buf, have_len);
+      buf = rx_buf;
+
+      int need_ret = hu_aap_tra_recv(&buf[have_len], need_len,
+                                     -1); // Get Rx packet from Transport. Use
+                                          // -1 instead of iaap_tra_recv_tmo to
+                                          // indicate need to get need_len bytes
+      // Length remaining for all sub-packets plus 4/8 byte headers
+      if (need_ret != need_len) {
+        logd("have_len: %d < enc_len: %d  need_len: %d", have_len, enc_len,
+             need_len);
+
+        loge("Recv bytes: %d but we expected: %d", need_ret, need_len);
+
+        hu_aap_stop();
+
+        return (-1);
+      }
+      have_len = enc_len; // Length to process now = encoded length for 1 packet
+    }
+
+    ret = iaap_recv_dec_process(
+        chan, flags, buf,
+        enc_len);  // Decrypt & Process 1 received encrypted message
+    if (ret < 0) { // If error...
+      loge("Error iaap_recv_dec_process() ret: %d  have_len: %d  enc_len: %d  "
+           "buf: %p  chan: %d %s  flags: 0x%x  msg_type: %d",
+           ret, have_len, enc_len, buf, chan, chan_get(chan), flags, msg_type);
+      hu_aap_stop();
+      return (ret);
+    }
+
+    have_len -=
+        enc_len; // Consume processed sub-packet and advance to next, if any
+    buf += enc_len;
+    if (have_len != 0)
+      logd("iaap_recv_dec_process() more than one message   have_len: %d  "
+           "enc_len: %d",
+           have_len, enc_len);
+  }
+
+  return (ret); // Return value from the last iaap_recv_dec_process() call;
+                // should be 0
+}
+
+int hu_aap_stop() { // Sends Byebye, then stops Transport/USBACC/OAP
+
+  // Continue only if started or starting...
+  if (iaap_state != hu_STATE_STARTED && iaap_state != hu_STATE_STARTIN)
+    return (0);
+
+  // Send Byebye
+  iaap_state = hu_STATE_STOPPIN;
+  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+
+  int ret = ihu_tra_stop(); // Stop Transport/USBACC/OAP
+  iaap_state = hu_STATE_STOPPED;
+  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+
+  return (ret);
+}
+/*
+ *
+ */
+int hu_aap_start(byte ep_in_addr, byte ep_out_addr, long myip_string,
+                 int transport_audio,
+                 int hr) { // Starts Transport/USBACC/OAP, then AA protocol w/
+                           // VersReq(1), SSL handshake, Auth Complete
+  logd("Starting hu_aap_start %d audio transport: %d", myip_string,
+       transport_audio);
+  // qDebug()<<"Starting hu_aap_start "<<myip_string<<" audio
+  // transport:"<<transport_audio;
+  if (iaap_state == hu_STATE_STARTED) {
+    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+    return (0);
+  }
+
+  iaap_state = hu_STATE_STARTIN;
+  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+
+  int ret = ihu_tra_start(ep_in_addr, ep_out_addr, myip_string, transport_audio,
+                          hr); // Start Transport/USBACC/OAP
+  if (ret) {
+    iaap_state = hu_STATE_STOPPED;
+    logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+    return (ret); // Done if error
+  }
+
+  byte vr_buf[] = {0, 3, 0, 6, 0, 1, 0, 1, 0, 1}; // Version Request
+  ret = hu_aap_tra_set(0, 3, 1, vr_buf, sizeof(vr_buf));
+  ret =
+      hu_aap_tra_send(0, vr_buf, sizeof(vr_buf), 1000); // Send Version Request
+  if (ret < 0) {
+    loge("Version request send ret: %d", ret);
+    hu_aap_stop();
+    return (-1);
+  }
+
+  byte buf[DEFBUF] = {0};
+  errno = 0;
+  ret = hu_aap_tra_recv(
+      buf, sizeof(buf),
+      1000); // Get Rx packet from Transport:    Wait for Version Response
+  if (ret <= 0) {
+    loge("Version response recv ret: %d", ret);
+    hu_aap_stop();
+    return (-1);
+  }
+  logd("Version response recv ret: %d", ret);
+
+  //*
+  ret = hu_ssl_handshake(); // Do SSL Client Handshake with AA SSL server
+  if (ret) {
+    hu_aap_stop();
+    return (ret);
+  }
+
+  byte ac_buf[] = {0, 3, 0, 4, 0, 4, 8, 0}; // Status = OK
+  ret = hu_aap_tra_set(0, 3, 4, ac_buf, sizeof(ac_buf));
+  ret = hu_aap_tra_send(0, ac_buf, sizeof(ac_buf),
+                        1000); // Auth Complete, must be sent in plaintext
+  if (ret < 0) {
+    loge("hu_aap_tra_send() ret: %d", ret);
+    hu_aap_stop();
+    return (-1);
+  }
+  hu_ssl_inf_log();
+
+  iaap_state = hu_STATE_STARTED;
+  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+  //*/
+
+  return (0);
+}
+
+int hu_aap_tra_set(int chan, int flags, int type, byte *buf,
+                   int len) { // Convenience function sets up 6 byte Transport
+                              // header: chan, flags, len, type
+
+  buf[0] = (byte)chan; // Encode channel and flags
+  buf[1] = (byte)flags;
+  buf[2] = (len - 4) / 256; // Encode length of following data:
+  buf[3] = (len - 4) % 256;
+  if (type >= 0) { // If type not negative, which indicates encrypted type
+                   // should not be touched...
+    buf[4] = type / 256;
+    buf[5] = type % 256; // Encode msg_type
+  }
+
+  return (len);
+}
+
+int hu_aap_tra_recv(byte *buf, int len, int tmo) {
+  int ret = 0;
+  if (iaap_state != hu_STATE_STARTED &&
+      iaap_state != hu_STATE_STARTIN) { // Need to recv when starting
+    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+    return (-1);
+  }
+  ret = ihu_tra_recv(buf, len, tmo);
+  /* if (ret < 0) {
+    loge ("ihu_tra_recv() error so stop Transport & AAP  ret: %d", ret);
+    hu_aap_stop ();
+  }
+  return (ret);*/
+  return ret;
+}
+// NOTE: Added gartnera's changes
+int hu_aap_tra_send(int retry, byte *buf, int len,
+                    int tmo) { // Send Transport data: chan,flags,len,type,...
+  // Need to send when starting
+  if (iaap_state != hu_STATE_STARTED && iaap_state != hu_STATE_STARTIN) {
+    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
+    return (-1);
+  }
+
+  int ret = ihu_tra_send(buf, len, tmo);
+  if (ret < 0 || ret != len) {
+    if (retry == 0) {
+      loge("Error ihu_tra_send() error so stop Transport & AAP  ret: %d  len: "
+           "%d",
+           ret, len);
+      hu_aap_stop();
+    }
+    return (-1);
+  }
+
+  if (ena_log_verbo && ena_log_aap_send)
+    logd("OK ihu_tra_send() ret: %d  len: %d", ret, len);
+  return (ret);
+}
+
+void iaap_video_decode(byte *buf, int len) {
+
+  byte *q_buf = (byte *)vid_write_tail_buf_get(len); // Get queue buffer tail to
+                                                     // write to     !!! Need to
+                                                     // lock until buffer
+                                                     // written to !!!!
+  if (ena_log_verbo)
+    logd("video q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
+  if (q_buf == NULL) {
+    loge("Error video no q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
+    // return;                                                         //
+    // Continue in order to write to record file
+  } else
+    memcpy(q_buf, buf, len); // Copy video to queue buffer
+
+  if (vid_rec_ena == 0) // Return if video recording not enabled
+    return;
+
+#ifndef NDEBUG
+  char *vid_rec_file = (char *)"/home/m/dev/hu/aa.h264";
+#ifdef __ANDROID_API__
+  vid_rec_file = "/sdcard/hu.h264";
+#endif
+
+  if (vid_rec_fd < 0)
+    vid_rec_fd =
+        open(vid_rec_file, O_RDWR | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
+  int written = -77;
+  if (vid_rec_fd >= 0)
+    written = write(vid_rec_fd, buf, len);
+  logd("Video written: %d", written);
+#endif
+}
+
+/* 8,192 bytes per packet at stereo 48K 16 bit = 42.667 ms per packet
+Timestamp = uptime in microseconds:
+ms: 337, 314 0x71fd616538  0x71fd620560   0x71fd62a970 (489,582,406,000)
+                                                                                           diff:  0xA028 (41000)    0xA410  (42000)
+07-01 18:54:11.067 W/                        hex_dump(28628): AUDIO:  00000000
+00 00 00 00 00 71 fd 61 65 38 00 00 00 00 00 00
+07-01 18:54:11.404 W/                        hex_dump(28628): AUDIO:  00000000
+00 00 00 00 00 71 fd 62 05 60 00 00 00 00 00 00
+07-01 18:54:11.718 W/                        hex_dump(28628): AUDIO:  00000000
+00 00 00 00 00 71 fd 62 a9 70 00 00 00 00 00 00
+
+*/
+
+void iaap_audio_decode(int chan, byte *buf, int len) {
+//*
+
+// hu_uti.c:  #define aud_buf_BUFS_SIZE    65536 * 4      // Up to 256 Kbytes
+#define aud_buf_BUFS_SIZE 65536 * 4 // Up to 256 Kbytes
+  if (len > aud_buf_BUFS_SIZE) {
+    loge("Error audio len: %d  aud_buf_BUFS_SIZE: %d", len, aud_buf_BUFS_SIZE);
+    len = aud_buf_BUFS_SIZE;
+  }
+
+  byte *q_buf = (byte *)aud_write_tail_buf_get(len); // Get queue buffer tail to
+                                                     // write to     !!! Need to
+                                                     // lock until buffer
+                                                     // written to !!!!
+  if (ena_log_verbo)
+    logd("audio q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
+  if (q_buf == NULL) {
+    loge("Error audio no q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
+    // return;                                                         //
+    // Continue in order to write to record file
+  } else {
+    memcpy(q_buf, buf, len); // Copy audio to queue buffer
+
+    if (0) {    // chan == AA_CH_AU1 || chan == AA_CH_AU2) {
+      len *= 6; // 48k stereo takes 6 times the space
+      if (len > aud_buf_BUFS_SIZE) {
+        loge("Error * 6  audio len: %d  aud_buf_BUFS_SIZE: %d", len,
+             aud_buf_BUFS_SIZE);
+        len = aud_buf_BUFS_SIZE;
+      }
+      int idx = 0;
+      int idxi = 0;
+      for (idx = 0; idx < len;
+           idx += 12) { // Convert 16K mono to 48k stereo equivalent;
+                        // interpolation would be better
+        q_buf[idx + 0] = buf[idxi + 0];
+        q_buf[idx + 1] = buf[idxi + 1];
+        q_buf[idx + 2] = buf[idxi + 0];
+        q_buf[idx + 3] = buf[idxi + 1];
+        q_buf[idx + 4] = buf[idxi + 0];
+        q_buf[idx + 5] = buf[idxi + 1];
+        q_buf[idx + 6] = buf[idxi + 0];
+        q_buf[idx + 7] = buf[idxi + 1];
+        q_buf[idx + 8] = buf[idxi + 0];
+        q_buf[idx + 9] = buf[idxi + 1];
+        q_buf[idx + 10] = buf[idxi + 0];
+        q_buf[idx + 11] = buf[idxi + 1];
+        idxi += 2;
+      }
+    }
+  }
+
+  //*/
+  if (aud_rec_ena == 0) // Return if audio recording not enabled
+    return;
+
+  //#ifndef NDEBUG
+  char *aud_rec_file = (char *)"/home/m/dev/hu/aa.pcm";
+#ifdef __ANDROID_API__
+  aud_rec_file = "/sdcard/hu.pcm";
+#endif
+
+  if (aud_rec_fd < 0)
+    aud_rec_fd =
+        open(aud_rec_file, O_RDWR | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
+  int written = -77;
+  if (aud_rec_fd >= 0)
+    written = write(aud_rec_fd, buf, len);
+  logv("Audio written: %d", written);
+  //#endif
+}
+
+// int aud_ack_ctr = 0;
+int iaap_audio_process(int chan, int msg_type, int flags, byte *buf,
+                       int len) { // 300 ms @ 48000/sec   samples = 14400
+                                  // stereo 16 bit results in bytes = 57600
+  // loge ("????????????????????? !!!!!!!!!!!!!!!!!!!!!!!!!
+  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!   aud_ack_ctr: %d  len: %d", aud_ack_ctr
+  // ++, len);
+
+  // logd ("iaap_audio_process chan: %d  msg_type: %d  flags: 0x%x  buf: %p
+  // len: %d", chan, msg_type, flags, buf, len); // iaap_audio_process msg_type:
+  // 0  flags: 0xb  buf: 0xe08cbfb8  len: 8202
+
+  if (chan == AA_CH_AU1)
+    aud_ack[3] = ack_val_au1;
+  else if (chan == AA_CH_AU2)
+    aud_ack[3] = ack_val_au2;
+  else
+    aud_ack[3] = ack_val_aud;
+
+  int ret = hu_aap_enc_send(
+      0, chan, aud_ack,
+      sizeof(aud_ack)); // Respond with ACK (for all fragments ?)
+
+  // hex_dump ("AUDIO: ", 16, buf, len);
+  if (len >= 10) {
+    int ctr = 0;
+    unsigned long ts = 0, t2 = 0;
+    for (ctr = 2; ctr <= 9; ctr++) {
+      ts = ts << 8;
+      t2 = t2 << 8;
+      ts += (unsigned long)buf[ctr];
+      t2 += buf[ctr];
+      if (ctr == 6)
+        logv("iaap_audio_process ts: %d 0x%x  t2: %d 0x%x", ts, ts, t2, t2);
+    }
+    logv("iaap_audio_process ts: %d 0x%x  t2: %d 0x%x", ts, ts, t2, t2);
+    /*
+07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:  00000000
+00 00 00 00 00 79 3e 5c bd 60 45 ef 6c 1a 79 f6
+07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:      0010
+a8 15 15 fe b3 14 8c fc e8 0c 34 f8 bf 02 ec 00
+07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:      0020
+ab 0a 9a 0d a1 1d 88 0a ae 1e e5 03 a9 16 8d 10
+07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:      0030
+d9 1f 3c 28 af 34 9b 35 e2 3e e2 36 fd 3c b4 34
+07-02 03:33:26.487 D/              iaap_audio_process( 1549): iaap_audio_process
+ts: 31038 0x793e  t2: 31038 0x793e
+07-02 03:33:26.487 D/              iaap_audio_process( 1549): iaap_audio_process
+ts: 1046265184 0x3e5cbd60  t2: 1046265184 0x3e5cbd60
+*/
+    iaap_audio_decode(
+        chan, &buf[10],
+        len - 10); // assy, assy_size); // Decode PCM audio fully re-assembled
+  }
+
+  return (0);
+}
+
+// int vid_ack_ctr = 0;
+int iaap_video_process(int msg_type, int flags, byte *buf,
+                       int len) { // Process video packet
+                                  // MaxUnack
+  // loge ("????????????????????? !!!!!!!!!!!!!!!!!!!!!!!!!
+  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!   vid_ack_ctr: %d  len: %d", vid_ack_ctr
+  // ++, len);
+  int ret = hu_aap_enc_send(
+      0, AA_CH_VID, vid_ack,
+      sizeof(vid_ack)); // Respond with ACK (for all fragments ?)
+
+  if (0) {
+  } else if (flags == 11 && (msg_type == 0 || msg_type == 1) &&
+             (buf[10] == 0 && buf[11] == 0 && buf[12] == 0 &&
+              buf[13] == 1)) {             // If Not fragmented Video
+    iaap_video_decode(&buf[10], len - 10); // Decode H264 video
+  } else if (flags == 9 && (msg_type == 0 || msg_type == 1) &&
+             (buf[10] == 0 && buf[11] == 0 && buf[12] == 0 &&
+              buf[13] == 1)) {        // If First fragment Video
+    memcpy(assy, &buf[10], len - 10); // Len in bytes 2,3 doesn't include total
+                                      // len 4 bytes at 4,5,6,7
+    assy_size = len - 10;             // Add to re-assembly in progress
+  } else if (flags == 11 && msg_type == 1 &&
+             (buf[2] == 0 && buf[3] == 0 && buf[4] == 0 &&
+              buf[5] == 1)) { // If Not fragmented First video config packet
+    iaap_video_decode(&buf[2], len - 2); // Decode H264 video
+  } else if (flags == 8) {               // If Middle fragment Video
+    memcpy(&assy[assy_size], buf, len);
+    assy_size += len;       // Add to re-assembly in progress
+  } else if (flags == 10) { // If Last fragment Video
+    memcpy(&assy[assy_size], buf, len);
+    assy_size += len;                   // Add to re-assembly in progress
+    iaap_video_decode(assy, assy_size); // Decode H264 video fully re-assembled
+  } else
+    loge("Video error msg_type: %d  flags: 0x%x  buf: %p  len: %d", msg_type,
+         flags, buf, len);
+
+  return (0);
+}
+
+int iaap_msg_process(int chan, int flags, byte *buf, int len) {
+
+  int msg_type = (int)buf[1];
+  msg_type += ((int)buf[0] * 256);
+
+  if (ena_log_verbo)
+    logd("iaap_msg_process msg_type: %d  len: %d  buf: %p", msg_type, len, buf);
+
+  int run = 0;
+  if ((chan == AA_CH_AUD || chan == AA_CH_AU1 || chan == AA_CH_AU2) &&
+      (msg_type == 0 || msg_type == 1)) { // || flags == 8 || flags == 9 ||
+                                          // flags == 10 ) {         // If Audio
+                                          // Output...
+    return (iaap_audio_process(chan, msg_type, flags, buf,
+                               len)); // 300 ms @ 48000/sec   samples = 14400
+                                      // stereo 16 bit results in bytes = 57600
+  } else if (chan == AA_CH_VID && msg_type == 0 || msg_type == 1 ||
+             flags == 8 || flags == 9 || flags == 10) { // If Video...
+    return (iaap_video_process(msg_type, flags, buf, len));
+  } else if (msg_type >= 0 && msg_type <= 31)
+    run = 0;
+  else if (msg_type >= 32768 && msg_type <= 32799)
+    run = 1;
+  else if (msg_type >= 65504 && msg_type <= 65535)
+    run = 2;
+  else {
+    loge("Unknown msg_type: %d", msg_type);
+    return (0);
+  }
+
+  int prot_func_ret = -1;
+  int num = msg_type & 0x1f;
+  aa_type_ptr_t func = NULL;
+  if (chan >= 0 && chan <= AA_CH_MAX)
+    func = aa_type_array[chan][run][num];
+  else
+    loge("chan >= 0 && chan <= AA_CH_MAX chan: %d %s", chan, chan_get(chan));
+  if (func)
+    prot_func_ret = (*func)(chan, buf, len);
+  else
+    loge("No func chan: %d %s  run: %d  num: %d", chan, chan_get(chan), run,
+         num);
+
+  if (log_packet_info) {
+    if (chan == AA_CH_VID &&
+        (flags == 8 || flags == 0x0a || msg_type == 0)) // || msg_type ==1))
+      ;
+    // else if (chan == AA_CH_VID && msg_type == 32768 + 4)
+    //  ;
+    else {
+      // logd ("        iaap_msg_process() len: %d  buf: %p  chan: %d %s  flags:
+      // 0x%x  msg_type: %d", len, buf, chan, chan_get (chan), flags, msg_type);
+      logd("--------------------------------------------------------"); // Empty
+      // line /
+      // 56
+      // characters
+    }
+  }
+
+  return (prot_func_ret);
+}
+
+/*
+http://stackoverflow.com/questions/22753221/openssl-read-write-handshake-data-with-memory-bio
+http://www.roxlu.com/2014/042/using-openssl-with-memory-bios
+https://www.openssl.org/docs/ssl/SSL_read.html
+http://blog.davidwolinsky.com/2009/10/memory-bios-and-openssl.html
+http://www.cisco.com/c/en/us/support/docs/security-vpn/secure-socket-layer-ssl/116181-technote-product-00.html
+*/
+
+int iaap_recv_dec_process(
+    int chan, int flags, byte *buf,
+    int len) { // Decrypt & Process 1 received encrypted message
+
+  int bytes_written =
+      BIO_write(hu_ssl_rm_bio, buf, len); // Write encrypted to SSL input BIO
+  if (bytes_written <= 0) {
+    loge("BIO_write() bytes_written: %d", bytes_written);
+    return (-1);
+  }
+  if (bytes_written != len)
+    loge("BIO_write() len: %d  bytes_written: %d  chan: %d %s", len,
+         bytes_written, chan, chan_get(chan));
+  else if (ena_log_verbo)
+    logd("BIO_write() len: %d  bytes_written: %d  chan: %d %s", len,
+         bytes_written, chan, chan_get(chan));
+
+  errno = 0;
+  int ctr = 0;
+  int max_tries = 1; // Higher never works
+  int bytes_read = -1;
+  while (bytes_read <= 0 && ctr++ < max_tries) {
+    bytes_read =
+        SSL_read(hu_ssl_ssl, dec_buf,
+                 sizeof(dec_buf)); // Read decrypted to decrypted rx buf
+    if (bytes_read <= 0) {
+      loge("ctr: %d  SSL_read() bytes_read: %d  errno: %d", ctr, bytes_read,
+           errno);
+      hu_ssl_ret_log(bytes_read);
+      ms_sleep(1);
+    }
+    // logd ("ctr: %d  SSL_read() bytes_read: %d  errno: %d", ctr, bytes_read,
+    // errno);
+  }
+
+  if (bytes_read <= 0) {
+    loge("ctr: %d  SSL_read() bytes_read: %d  errno: %d", ctr, bytes_read,
+         errno);
+    hu_ssl_ret_log(bytes_read);
+    // Emil - uncoment next line
+    // return (-1);                                                      //
+    // Fatal so return error and de-initialize; Should we be able to recover, if
+    // Transport data got corrupted ??
+  }
+  if (ena_log_verbo)
+    logd("ctr: %d  SSL_read() bytes_read: %d", ctr, bytes_read);
+  /*
+#ifndef NDEBUG
+  ////    if (chan != AA_CH_VID)                                          // If
+not video...
+  if (log_packet_info) {
+      char prefix [DEFBUF] = {0};
+      snprintf (prefix, sizeof (prefix), "R %d %s %1.1x", chan, chan_get (chan),
+flags);  // "R 1 VID B"
+      int rmv = hu_aad_dmp ((byte*)prefix, "AA", chan, flags, dec_buf,
+bytes_read);           // Dump decrypted AA
+  }
+#endif
+*/
+  int prot_func_ret =
+      iaap_msg_process(chan, flags, dec_buf,
+                       bytes_read); // Process decrypted AA protocol message
+  return (0);                       // prot_func_ret);
+}
 int aa_pro_ctr_a00(int chan, byte *buf, int len) {
   loge("!!!!!!!!");
   return (-1);
@@ -631,20 +1254,6 @@ int aa_pro_aud_b01(int chan, byte *buf,
     ack_val_au2 = buf[3]; // Save value for audio2 acks
   return (0);
 }
-int hu_aap_out_get(int chan) {
-  int state = 0;
-  if (chan == AA_CH_AUD) {
-    state = out_state_aud; // Get current audio output state change
-    out_state_aud = -1;    // Reset audio output state change indication
-  } else if (chan == AA_CH_AU1) {
-    state = out_state_au1; // Get current audio output state change
-    out_state_au1 = -1;    // Reset audio output state change indication
-  } else if (chan == AA_CH_AU2) {
-    state = out_state_au2; // Get current audio output state change
-    out_state_au2 = -1;    // Reset audio output state change indication
-  }
-  return (state); // Return what the new state was before reset
-}
 
 int aa_pro_aud_b02(int chan, byte *buf,
                    int len) { // 08-22 20:03:09.075 D/ .... hex_dump(30767): S 4
@@ -740,14 +1349,6 @@ int aa_pro_tou_b02(int chan, byte *buf,
       sizeof(rsp)); // Respond with Key Binding/Audio Response = OK
   return (ret);
 }
-
-int hu_aap_mic_get() {
-  int ret_status = mic_change_status; // Get current mic change status
-  if (mic_change_status == 2 || mic_change_status == 1) { // If start or stop...
-    mic_change_status = 0; // Reset mic change status to "No Change"
-  }
-  return (ret_status); // Return original mic change status
-}
 int aa_pro_mic_b01(int chan, byte *buf, int len) { // Media Mic Start Request...
   if (len != 4 || buf[2] != 0x08)
     loge("Media Mic Start Request ????");
@@ -775,601 +1376,3 @@ int aa_pro_mic_b05(int chan, byte *buf, int len) {
   return (0);
 }
 
-void iaap_video_decode(byte *buf, int len) {
-
-  byte *q_buf = (byte *)vid_write_tail_buf_get(len); // Get queue buffer tail to
-                                                     // write to     !!! Need to
-                                                     // lock until buffer
-                                                     // written to !!!!
-  if (ena_log_verbo)
-    logd("video q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
-  if (q_buf == NULL) {
-    loge("Error video no q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
-    // return;                                                         //
-    // Continue in order to write to record file
-  } else
-    memcpy(q_buf, buf, len); // Copy video to queue buffer
-
-  if (vid_rec_ena == 0) // Return if video recording not enabled
-    return;
-
-#ifndef NDEBUG
-  char *vid_rec_file = (char *)"/home/m/dev/hu/aa.h264";
-#ifdef __ANDROID_API__
-  vid_rec_file = "/sdcard/hu.h264";
-#endif
-
-  if (vid_rec_fd < 0)
-    vid_rec_fd =
-        open(vid_rec_file, O_RDWR | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
-  int written = -77;
-  if (vid_rec_fd >= 0)
-    written = write(vid_rec_fd, buf, len);
-  logd("Video written: %d", written);
-#endif
-}
-
-/* 8,192 bytes per packet at stereo 48K 16 bit = 42.667 ms per packet
-Timestamp = uptime in microseconds:
-ms: 337, 314 0x71fd616538  0x71fd620560   0x71fd62a970 (489,582,406,000)
-                                                                                           diff:  0xA028 (41000)    0xA410  (42000)
-07-01 18:54:11.067 W/                        hex_dump(28628): AUDIO:  00000000
-00 00 00 00 00 71 fd 61 65 38 00 00 00 00 00 00
-07-01 18:54:11.404 W/                        hex_dump(28628): AUDIO:  00000000
-00 00 00 00 00 71 fd 62 05 60 00 00 00 00 00 00
-07-01 18:54:11.718 W/                        hex_dump(28628): AUDIO:  00000000
-00 00 00 00 00 71 fd 62 a9 70 00 00 00 00 00 00
-
-*/
-
-void iaap_audio_decode(int chan, byte *buf, int len) {
-//*
-
-// hu_uti.c:  #define aud_buf_BUFS_SIZE    65536 * 4      // Up to 256 Kbytes
-#define aud_buf_BUFS_SIZE 65536 * 4 // Up to 256 Kbytes
-  if (len > aud_buf_BUFS_SIZE) {
-    loge("Error audio len: %d  aud_buf_BUFS_SIZE: %d", len, aud_buf_BUFS_SIZE);
-    len = aud_buf_BUFS_SIZE;
-  }
-
-  byte *q_buf = (byte *)aud_write_tail_buf_get(len); // Get queue buffer tail to
-                                                     // write to     !!! Need to
-                                                     // lock until buffer
-                                                     // written to !!!!
-  if (ena_log_verbo)
-    logd("audio q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
-  if (q_buf == NULL) {
-    loge("Error audio no q_buf: %p  buf: %p  len: %d", q_buf, buf, len);
-    // return;                                                         //
-    // Continue in order to write to record file
-  } else {
-    memcpy(q_buf, buf, len); // Copy audio to queue buffer
-
-    if (0) {    // chan == AA_CH_AU1 || chan == AA_CH_AU2) {
-      len *= 6; // 48k stereo takes 6 times the space
-      if (len > aud_buf_BUFS_SIZE) {
-        loge("Error * 6  audio len: %d  aud_buf_BUFS_SIZE: %d", len,
-             aud_buf_BUFS_SIZE);
-        len = aud_buf_BUFS_SIZE;
-      }
-      int idx = 0;
-      int idxi = 0;
-      for (idx = 0; idx < len;
-           idx += 12) { // Convert 16K mono to 48k stereo equivalent;
-                        // interpolation would be better
-        q_buf[idx + 0] = buf[idxi + 0];
-        q_buf[idx + 1] = buf[idxi + 1];
-        q_buf[idx + 2] = buf[idxi + 0];
-        q_buf[idx + 3] = buf[idxi + 1];
-        q_buf[idx + 4] = buf[idxi + 0];
-        q_buf[idx + 5] = buf[idxi + 1];
-        q_buf[idx + 6] = buf[idxi + 0];
-        q_buf[idx + 7] = buf[idxi + 1];
-        q_buf[idx + 8] = buf[idxi + 0];
-        q_buf[idx + 9] = buf[idxi + 1];
-        q_buf[idx + 10] = buf[idxi + 0];
-        q_buf[idx + 11] = buf[idxi + 1];
-        idxi += 2;
-      }
-    }
-  }
-
-  //*/
-  if (aud_rec_ena == 0) // Return if audio recording not enabled
-    return;
-
-  //#ifndef NDEBUG
-  char *aud_rec_file = (char *)"/home/m/dev/hu/aa.pcm";
-#ifdef __ANDROID_API__
-  aud_rec_file = "/sdcard/hu.pcm";
-#endif
-
-  if (aud_rec_fd < 0)
-    aud_rec_fd =
-        open(aud_rec_file, O_RDWR | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
-  int written = -77;
-  if (aud_rec_fd >= 0)
-    written = write(aud_rec_fd, buf, len);
-  logv("Audio written: %d", written);
-  //#endif
-}
-
-// int aud_ack_ctr = 0;
-int iaap_audio_process(int chan, int msg_type, int flags, byte *buf,
-                       int len) { // 300 ms @ 48000/sec   samples = 14400
-                                  // stereo 16 bit results in bytes = 57600
-  // loge ("????????????????????? !!!!!!!!!!!!!!!!!!!!!!!!!
-  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!   aud_ack_ctr: %d  len: %d", aud_ack_ctr
-  // ++, len);
-
-  // logd ("iaap_audio_process chan: %d  msg_type: %d  flags: 0x%x  buf: %p
-  // len: %d", chan, msg_type, flags, buf, len); // iaap_audio_process msg_type:
-  // 0  flags: 0xb  buf: 0xe08cbfb8  len: 8202
-
-  if (chan == AA_CH_AU1)
-    aud_ack[3] = ack_val_au1;
-  else if (chan == AA_CH_AU2)
-    aud_ack[3] = ack_val_au2;
-  else
-    aud_ack[3] = ack_val_aud;
-
-  int ret = hu_aap_enc_send(
-      0, chan, aud_ack,
-      sizeof(aud_ack)); // Respond with ACK (for all fragments ?)
-
-  // hex_dump ("AUDIO: ", 16, buf, len);
-  if (len >= 10) {
-    int ctr = 0;
-    unsigned long ts = 0, t2 = 0;
-    for (ctr = 2; ctr <= 9; ctr++) {
-      ts = ts << 8;
-      t2 = t2 << 8;
-      ts += (unsigned long)buf[ctr];
-      t2 += buf[ctr];
-      if (ctr == 6)
-        logv("iaap_audio_process ts: %d 0x%x  t2: %d 0x%x", ts, ts, t2, t2);
-    }
-    logv("iaap_audio_process ts: %d 0x%x  t2: %d 0x%x", ts, ts, t2, t2);
-    /*
-07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:  00000000
-00 00 00 00 00 79 3e 5c bd 60 45 ef 6c 1a 79 f6
-07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:      0010
-a8 15 15 fe b3 14 8c fc e8 0c 34 f8 bf 02 ec 00
-07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:      0020
-ab 0a 9a 0d a1 1d 88 0a ae 1e e5 03 a9 16 8d 10
-07-02 03:33:26.486 W/                        hex_dump( 1549): AUDIO:      0030
-d9 1f 3c 28 af 34 9b 35 e2 3e e2 36 fd 3c b4 34
-07-02 03:33:26.487 D/              iaap_audio_process( 1549): iaap_audio_process
-ts: 31038 0x793e  t2: 31038 0x793e
-07-02 03:33:26.487 D/              iaap_audio_process( 1549): iaap_audio_process
-ts: 1046265184 0x3e5cbd60  t2: 1046265184 0x3e5cbd60
-*/
-    iaap_audio_decode(
-        chan, &buf[10],
-        len - 10); // assy, assy_size); // Decode PCM audio fully re-assembled
-  }
-
-  return (0);
-}
-
-// int vid_ack_ctr = 0;
-int iaap_video_process(int msg_type, int flags, byte *buf,
-                       int len) { // Process video packet
-                                  // MaxUnack
-  // loge ("????????????????????? !!!!!!!!!!!!!!!!!!!!!!!!!
-  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!   vid_ack_ctr: %d  len: %d", vid_ack_ctr
-  // ++, len);
-  int ret = hu_aap_enc_send(
-      0, AA_CH_VID, vid_ack,
-      sizeof(vid_ack)); // Respond with ACK (for all fragments ?)
-
-  if (0) {
-  } else if (flags == 11 && (msg_type == 0 || msg_type == 1) &&
-             (buf[10] == 0 && buf[11] == 0 && buf[12] == 0 &&
-              buf[13] == 1)) {             // If Not fragmented Video
-    iaap_video_decode(&buf[10], len - 10); // Decode H264 video
-  } else if (flags == 9 && (msg_type == 0 || msg_type == 1) &&
-             (buf[10] == 0 && buf[11] == 0 && buf[12] == 0 &&
-              buf[13] == 1)) {        // If First fragment Video
-    memcpy(assy, &buf[10], len - 10); // Len in bytes 2,3 doesn't include total
-                                      // len 4 bytes at 4,5,6,7
-    assy_size = len - 10;             // Add to re-assembly in progress
-  } else if (flags == 11 && msg_type == 1 &&
-             (buf[2] == 0 && buf[3] == 0 && buf[4] == 0 &&
-              buf[5] == 1)) { // If Not fragmented First video config packet
-    iaap_video_decode(&buf[2], len - 2); // Decode H264 video
-  } else if (flags == 8) {               // If Middle fragment Video
-    memcpy(&assy[assy_size], buf, len);
-    assy_size += len;       // Add to re-assembly in progress
-  } else if (flags == 10) { // If Last fragment Video
-    memcpy(&assy[assy_size], buf, len);
-    assy_size += len;                   // Add to re-assembly in progress
-    iaap_video_decode(assy, assy_size); // Decode H264 video fully re-assembled
-  } else
-    loge("Video error msg_type: %d  flags: 0x%x  buf: %p  len: %d", msg_type,
-         flags, buf, len);
-
-  return (0);
-}
-
-int iaap_msg_process(int chan, int flags, byte *buf, int len) {
-
-  int msg_type = (int)buf[1];
-  msg_type += ((int)buf[0] * 256);
-
-  if (ena_log_verbo)
-    logd("iaap_msg_process msg_type: %d  len: %d  buf: %p", msg_type, len, buf);
-
-  int run = 0;
-  if ((chan == AA_CH_AUD || chan == AA_CH_AU1 || chan == AA_CH_AU2) &&
-      (msg_type == 0 || msg_type == 1)) { // || flags == 8 || flags == 9 ||
-                                          // flags == 10 ) {         // If Audio
-                                          // Output...
-    return (iaap_audio_process(chan, msg_type, flags, buf,
-                               len)); // 300 ms @ 48000/sec   samples = 14400
-                                      // stereo 16 bit results in bytes = 57600
-  } else if (chan == AA_CH_VID && msg_type == 0 || msg_type == 1 ||
-             flags == 8 || flags == 9 || flags == 10) { // If Video...
-    return (iaap_video_process(msg_type, flags, buf, len));
-  } else if (msg_type >= 0 && msg_type <= 31)
-    run = 0;
-  else if (msg_type >= 32768 && msg_type <= 32799)
-    run = 1;
-  else if (msg_type >= 65504 && msg_type <= 65535)
-    run = 2;
-  else {
-    loge("Unknown msg_type: %d", msg_type);
-    return (0);
-  }
-
-  int prot_func_ret = -1;
-  int num = msg_type & 0x1f;
-  aa_type_ptr_t func = NULL;
-  if (chan >= 0 && chan <= AA_CH_MAX)
-    func = aa_type_array[chan][run][num];
-  else
-    loge("chan >= 0 && chan <= AA_CH_MAX chan: %d %s", chan, chan_get(chan));
-  if (func)
-    prot_func_ret = (*func)(chan, buf, len);
-  else
-    loge("No func chan: %d %s  run: %d  num: %d", chan, chan_get(chan), run,
-         num);
-
-  if (log_packet_info) {
-    if (chan == AA_CH_VID &&
-        (flags == 8 || flags == 0x0a || msg_type == 0)) // || msg_type ==1))
-      ;
-    // else if (chan == AA_CH_VID && msg_type == 32768 + 4)
-    //  ;
-    else {
-      // logd ("        iaap_msg_process() len: %d  buf: %p  chan: %d %s  flags:
-      // 0x%x  msg_type: %d", len, buf, chan, chan_get (chan), flags, msg_type);
-      logd("--------------------------------------------------------"); // Empty
-      // line /
-      // 56
-      // characters
-    }
-  }
-
-  return (prot_func_ret);
-}
-
-int hu_aap_stop() { // Sends Byebye, then stops Transport/USBACC/OAP
-
-  // Continue only if started or starting...
-  if (iaap_state != hu_STATE_STARTED && iaap_state != hu_STATE_STARTIN)
-    return (0);
-
-  // Send Byebye
-  iaap_state = hu_STATE_STOPPIN;
-  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-
-  int ret = ihu_tra_stop(); // Stop Transport/USBACC/OAP
-  iaap_state = hu_STATE_STOPPED;
-  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-
-  return (ret);
-}
-/*
- *
- */
-int hu_aap_start(byte ep_in_addr, byte ep_out_addr, long myip_string,
-                 int transport_audio,
-                 int hr) { // Starts Transport/USBACC/OAP, then AA protocol w/
-                           // VersReq(1), SSL handshake, Auth Complete
-  logd("Starting hu_aap_start %d audio transport: %d", myip_string,
-       transport_audio);
-  // qDebug()<<"Starting hu_aap_start "<<myip_string<<" audio
-  // transport:"<<transport_audio;
-  if (iaap_state == hu_STATE_STARTED) {
-    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-    return (0);
-  }
-
-  iaap_state = hu_STATE_STARTIN;
-  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-
-  int ret = ihu_tra_start(ep_in_addr, ep_out_addr, myip_string, transport_audio,
-                          hr); // Start Transport/USBACC/OAP
-  if (ret) {
-    iaap_state = hu_STATE_STOPPED;
-    logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-    return (ret); // Done if error
-  }
-
-  byte vr_buf[] = {0, 3, 0, 6, 0, 1, 0, 1, 0, 1}; // Version Request
-  ret = hu_aap_tra_set(0, 3, 1, vr_buf, sizeof(vr_buf));
-  ret =
-      hu_aap_tra_send(0, vr_buf, sizeof(vr_buf), 1000); // Send Version Request
-  if (ret < 0) {
-    loge("Version request send ret: %d", ret);
-    hu_aap_stop();
-    return (-1);
-  }
-
-  byte buf[DEFBUF] = {0};
-  errno = 0;
-  ret = hu_aap_tra_recv(
-      buf, sizeof(buf),
-      1000); // Get Rx packet from Transport:    Wait for Version Response
-  if (ret <= 0) {
-    loge("Version response recv ret: %d", ret);
-    hu_aap_stop();
-    return (-1);
-  }
-  logd("Version response recv ret: %d", ret);
-
-  //*
-  ret = hu_ssl_handshake(); // Do SSL Client Handshake with AA SSL server
-  if (ret) {
-    hu_aap_stop();
-    return (ret);
-  }
-
-  byte ac_buf[] = {0, 3, 0, 4, 0, 4, 8, 0}; // Status = OK
-  ret = hu_aap_tra_set(0, 3, 4, ac_buf, sizeof(ac_buf));
-  ret = hu_aap_tra_send(0, ac_buf, sizeof(ac_buf),
-                        1000); // Auth Complete, must be sent in plaintext
-  if (ret < 0) {
-    loge("hu_aap_tra_send() ret: %d", ret);
-    hu_aap_stop();
-    return (-1);
-  }
-  hu_ssl_inf_log();
-
-  iaap_state = hu_STATE_STARTED;
-  logd("  SET: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-  //*/
-
-  return (0);
-}
-
-/*
-http://stackoverflow.com/questions/22753221/openssl-read-write-handshake-data-with-memory-bio
-http://www.roxlu.com/2014/042/using-openssl-with-memory-bios
-https://www.openssl.org/docs/ssl/SSL_read.html
-http://blog.davidwolinsky.com/2009/10/memory-bios-and-openssl.html
-http://www.cisco.com/c/en/us/support/docs/security-vpn/secure-socket-layer-ssl/116181-technote-product-00.html
-*/
-
-int iaap_recv_dec_process(
-    int chan, int flags, byte *buf,
-    int len) { // Decrypt & Process 1 received encrypted message
-
-  int bytes_written =
-      BIO_write(hu_ssl_rm_bio, buf, len); // Write encrypted to SSL input BIO
-  if (bytes_written <= 0) {
-    loge("BIO_write() bytes_written: %d", bytes_written);
-    return (-1);
-  }
-  if (bytes_written != len)
-    loge("BIO_write() len: %d  bytes_written: %d  chan: %d %s", len,
-         bytes_written, chan, chan_get(chan));
-  else if (ena_log_verbo)
-    logd("BIO_write() len: %d  bytes_written: %d  chan: %d %s", len,
-         bytes_written, chan, chan_get(chan));
-
-  errno = 0;
-  int ctr = 0;
-  int max_tries = 1; // Higher never works
-  int bytes_read = -1;
-  while (bytes_read <= 0 && ctr++ < max_tries) {
-    bytes_read =
-        SSL_read(hu_ssl_ssl, dec_buf,
-                 sizeof(dec_buf)); // Read decrypted to decrypted rx buf
-    if (bytes_read <= 0) {
-      loge("ctr: %d  SSL_read() bytes_read: %d  errno: %d", ctr, bytes_read,
-           errno);
-      hu_ssl_ret_log(bytes_read);
-      ms_sleep(1);
-    }
-    // logd ("ctr: %d  SSL_read() bytes_read: %d  errno: %d", ctr, bytes_read,
-    // errno);
-  }
-
-  if (bytes_read <= 0) {
-    loge("ctr: %d  SSL_read() bytes_read: %d  errno: %d", ctr, bytes_read,
-         errno);
-    hu_ssl_ret_log(bytes_read);
-    // Emil - uncoment next line
-    // return (-1);                                                      //
-    // Fatal so return error and de-initialize; Should we be able to recover, if
-    // Transport data got corrupted ??
-  }
-  if (ena_log_verbo)
-    logd("ctr: %d  SSL_read() bytes_read: %d", ctr, bytes_read);
-  /*
-#ifndef NDEBUG
-  ////    if (chan != AA_CH_VID)                                          // If
-not video...
-  if (log_packet_info) {
-      char prefix [DEFBUF] = {0};
-      snprintf (prefix, sizeof (prefix), "R %d %s %1.1x", chan, chan_get (chan),
-flags);  // "R 1 VID B"
-      int rmv = hu_aad_dmp ((byte*)prefix, "AA", chan, flags, dec_buf,
-bytes_read);           // Dump decrypted AA
-  }
-#endif
-*/
-  int prot_func_ret =
-      iaap_msg_process(chan, flags, dec_buf,
-                       bytes_read); // Process decrypted AA protocol message
-  return (0);                       // prot_func_ret);
-}
-
-//  Process 1 encrypted "receive message set":
-// - Read encrypted message from Transport
-// - Process/react to decrypted message by sending responses etc.
-/*
-        Tricky issues:
-
-          - Read() may return less than a full packet.
-              USB is somewhat "packet oriented" once I raised
-   DEFBUF/sizeof(rx_buf) from 16K to 64K (Maximum video fragment size)
-              But TCP is more stream oriented.
-              Looking at DHU I have increased the buffer even further to 128Kb
-   (current value used in DHU) - Emil
-
-          - Read() may contain multiple packets, returning all or the end of one
-   packet, plus all or the beginning of the next packet.
-              So far I have only seen 2 complete packets in one read().
-
-          - Read() may return all or part of video stream data fragments.
-   Multiple fragments need to be re-assembled before H.264 video processing.
-            Fragments may be up to 64K - 256 in size. Maximum re-assembled video
-   packet seen is around 150K; using 256K re-assembly buffer at present.
-
-
-*/
-
-int hu_aap_recv_process() { //
-  // Terminate unless started or starting (we need to process when starting)
-  if (iaap_state != hu_STATE_STARTED && iaap_state != hu_STATE_STARTIN) {
-    loge("CHECK: iaap_state: %d (%s)", iaap_state, state_get(iaap_state));
-    return (-1);
-  }
-
-  byte *buf = rx_buf;
-  byte *temp_buf;
-  int ret = 0;
-  errno = 0;
-  // int min_size_hdr = 6;
-  int rx_len = sizeof(rx_buf);
-  // if (transport_type == 2)                                            // If
-  // wifi...
-  //  rx_len = min_size_hdr;                                           // Just
-  //  get the header
-
-  int have_len = 0; // Length remaining to process for all sub-packets plus 4/8
-                    // byte headers
-
-  have_len = hu_aap_tra_recv(rx_buf, rx_len,
-                             iaap_tra_recv_tmo); // Get Rx packet from Transport
-
-  if (have_len == 0) { // If no data, then done w/ no data
-    return (0);
-  }
-
-  while (have_len >
-         0) { // While length remaining to process,... Process Rx packet:
-    if (ena_log_verbo) {
-      logd("Recv while (have_len > 0): %d", have_len);
-#ifndef NDEBUG
-      hex_dump((char *)"LR: ", 16, buf, have_len);
-#endif
-    }
-    int chan = (int)buf[0]; // Channel
-    int flags = buf[1];     // Flags
-
-    int enc_len = (int)buf[3]; // Encoded length of bytes to be decrypted (minus
-                               // 4/8 byte headers)
-    enc_len += ((int)buf[2] * 256);
-
-    int msg_type = (int)buf[5]; // Message Type (or post handshake, mostly
-                                // indicator of SSL encrypted data)
-    msg_type += ((int)buf[4] * 256);
-
-    have_len -= 4; // Length starting at byte 4: Unencrypted Message Type or
-                   // Encrypted data start
-    buf += 4;      // buf points to data to be decrypted
-    if (flags & 0x08 != 0x08) {
-      loge("NOT ENCRYPTED !!!!!!!!! have_len: %d  enc_len: %d  buf: %p  chan: "
-           "%d %s  flags: 0x%x  msg_type: %d",
-           have_len, enc_len, buf, chan, chan_get(chan), flags, msg_type);
-      hu_aap_stop();
-      return (-1);
-    }
-    if (chan == AA_CH_VID &&
-        flags == 9) { // If First fragment Video... (Packet is encrypted so we
-                      // can't get the real msg_type or check for 0, 0, 0, 1)
-      int total_size = (int)buf[3];
-      total_size += ((int)buf[2] * 256);
-      total_size += ((int)buf[1] * 256 * 256);
-      total_size += ((int)buf[0] * 256 * 256 * 256);
-
-      if (total_size > max_assy_size) // If new  max_assy_size... (total_size
-                                      // seen as big as 151 Kbytes)
-        max_assy_size = total_size;   // Set new max_assy_size      See:
-                                      // jni/hu_aap.c:  byte assy [65536 * 16] =
-                                      // {0}; // up to 1 megabyte
-      //                               & jni/hu_uti.c:  #define
-      //                               vid_buf_BUFS_SIZE    65536 * 4
-      // Up to 256 Kbytes// & src/ca/yyx/hu/hu_tro.java:    byte [] assy = new
-      // byte [65536 * 16];
-      // & src/ca/yyx/hu/hu_tra.java:      res_buf = new byte [65536 * 4];
-      if (total_size > 160 * 1024)
-        logw("First fragment total_size: %d  max_assy_size: %d", total_size,
-             max_assy_size);
-      else
-        logv("First fragment total_size: %d  max_assy_size: %d", total_size,
-             max_assy_size);
-      have_len -= 4; // Remove 4 length bytes inserted into first video fragment
-      buf += 4;
-    }
-
-    if (have_len < enc_len) { // If we need more data for the full packet...
-      int need_len = enc_len - have_len;
-      memmove(rx_buf, buf, have_len);
-      buf = rx_buf;
-
-      int need_ret = hu_aap_tra_recv(&buf[have_len], need_len,
-                                     -1); // Get Rx packet from Transport. Use
-                                          // -1 instead of iaap_tra_recv_tmo to
-                                          // indicate need to get need_len bytes
-      // Length remaining for all sub-packets plus 4/8 byte headers
-      if (need_ret != need_len) {
-        logd("have_len: %d < enc_len: %d  need_len: %d", have_len, enc_len,
-             need_len);
-
-        loge("Recv bytes: %d but we expected: %d", need_ret, need_len);
-
-        hu_aap_stop();
-
-        return (-1);
-      }
-      have_len = enc_len; // Length to process now = encoded length for 1 packet
-    }
-
-    ret = iaap_recv_dec_process(
-        chan, flags, buf,
-        enc_len);  // Decrypt & Process 1 received encrypted message
-    if (ret < 0) { // If error...
-      loge("Error iaap_recv_dec_process() ret: %d  have_len: %d  enc_len: %d  "
-           "buf: %p  chan: %d %s  flags: 0x%x  msg_type: %d",
-           ret, have_len, enc_len, buf, chan, chan_get(chan), flags, msg_type);
-      hu_aap_stop();
-      return (ret);
-    }
-
-    have_len -=
-        enc_len; // Consume processed sub-packet and advance to next, if any
-    buf += enc_len;
-    if (have_len != 0)
-      logd("iaap_recv_dec_process() more than one message   have_len: %d  "
-           "enc_len: %d",
-           have_len, enc_len);
-  }
-
-  return (ret); // Return value from the last iaap_recv_dec_process() call;
-                // should be 0
-}
