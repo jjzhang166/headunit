@@ -18,7 +18,7 @@ Please see the video below for the software in operation (there is audio, but it
 ----------
 How to get the code working?
 ----------------------------
-
+For instruction on to get it setup on a Raspberry Pi and Raspbian [click here](https://github.com/viktorgino/headunit/blob/master/RPi_instructions.md).
 Install QT5 and you will probably want to install QT Creator with it as well. You can get it with apt-get:
 
     sudo apt-get install qtcreator
@@ -50,3 +50,4 @@ The code here is formatted with QT's clang-format, using the LLVM format, so ple
 
 ----------
 Android and Android Auto is a trademark of Google Inc.
+

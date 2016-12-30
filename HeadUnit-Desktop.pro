@@ -11,11 +11,6 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET = HeadUnit-Desktop
 TEMPLATE = app
 
-#QMAKE_CXXFLAGS += -pthread -static-libgcc -static-libstdc++
-#-Wcomment -Wunused-variable -Wunused-parameter
-#QMAKE_CFLAGS += -pthread# -Wcomment -Wunused-variable -Wunused-parameter
-#-lpthread #-fpermissive -lrt
-
 SOURCES += main.cpp\
         mainwindow.cpp \
     headunit/hu_ssl.c \
@@ -38,48 +33,48 @@ HEADERS  += mainwindow.h \
 
 FORMS    += mainwindow.ui
 
-unix: LIBS += -lcrypt
-unix: LIBS += -lcrypto
+INCLUDEPATH += $$PWD/include
+DEPENDPATH += $$PWD/include
+
+#Change this when cross-compling. More info here : https://wiki.debian.org/Multiarch/Tuples
+TUPLE = $$system(if hash "gcc" 2>/dev/null; then gcc -print-multiarch; else dpkg-architecture -qDEB_HOST_MULTIARCH; fi)
+
 unix: LIBS += -lssl
+unix: LIBS += -lcrypto
 unix: LIBS += -lusb-1.0
 unix: LIBS += -lglib-2.0
 unix: LIBS += -lgobject-2.0
 unix: LIBS += -lgstapp-1.0
 unix: LIBS += -lgstreamer-1.0
 unix: LIBS += -lgstapp-1.0
-unix: LIBS += -lQt5GLib-2.0
-unix: LIBS += -lQt5GStreamer-1.0
-unix: LIBS += -L$$PWD/../../../usr/local/lib/ -lQt5GStreamerUi-1.0
-unix: LIBS += -L$$PWD/../../../usr/local/lib/ -lQt5GStreamerUtils-1.0
+unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GLib-2.0
+unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GStreamer-1.0
+unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GStreamerUi-1.0
+unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GStreamerUtils-1.0
 
-unix: INCLUDEPATH += /usr/include
+unix: INCLUDEPATH += /usr/include/openssl
 unix: INCLUDEPATH += /usr/include/libusb-1.0
+unix: INCLUDEPATH += /usr/lib/$$TUPLE
+unix: INCLUDEPATH += /usr/lib/$$TUPLE/glib-2.0/include
 unix: INCLUDEPATH += /usr/include/gstreamer-1.0
 unix: INCLUDEPATH += /usr/include/glib-2.0
 unix: INCLUDEPATH += /usr/local/include/Qt5GStreamer
-unix: INCLUDEPATH += /usr/lib/x86_64-linux-gnu/glib-2.0/include
-
-INCLUDEPATH += $$PWD/include
-DEPENDPATH += $$PWD/include
+unix: INCLUDEPATH += /usr/lib/$$TUPLE/include/Qt5GStreamer
+unix: INCLUDEPATH += /usr/lib/$$TUPLE/glib-2.0/include
 
 win32: LIBS += -llibeay32MD
 win32: LIBS += -lssleay32MD
-
 win32: INCLUDEPATH += $$PWD/include/win32
 win32: DEPENDPATH += $$PWD/bin
-
 win32: INCLUDEPATH += $$PWD/bin
 win32: DEPENDPATH += $$PWD/bin
-
-
-win32: LIBS += -L$$PWD/bin/dll/ -llibusb-1.0
-
 win32: INCLUDEPATH += $$PWD/bin/dll
 win32: DEPENDPATH += $$PWD/bin/dll
+win32: LIBS += -L$$PWD/bin/dll/ -llibusb-1.0
 
+INCLUDEPATH += /usr/local/include
+DEPENDPATH += /usr/local/include
 
-INCLUDEPATH += $$PWD/../../../usr/local/include
-DEPENDPATH += $$PWD/../../../usr/local/include
 
 
 
