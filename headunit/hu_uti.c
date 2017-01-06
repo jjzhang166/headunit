@@ -176,6 +176,17 @@ int ena_hd_tra_recv = 0;
 int ena_log_hexdu = 1; // 1;    // Hex dump master enable
 int max_hex_dump = 64; // 32;
 
+hu_settings_t hu_settings = {"hu.key","hu.crt"};
+
+void hu_set_settings(char *pk,char *cert){
+  if( strcmp(pk, "")){
+    strcpy(hu_settings.privateKey_file,pk);
+  }
+  if(strcmp(cert, "")){
+    strcpy(hu_settings.certificate_file,cert);
+  }
+}
+
 #ifdef LOG_FILE
 int logfd = -1;
 void logfile(char *log_line) {

@@ -3,6 +3,7 @@
 
 #include <QMainWindow>
 #include <QPoint>
+#include <QSettings>
 #include <iostream>
 #include "headunit/hu_gst.h"
 #include "clickablevideowidget.h"
@@ -32,6 +33,7 @@ signals:
 private:
   Ui::MainWindow *ui;
   int mouseStatus = MOUSE_UP;
+  QSettings settings;
   // headunitworker *headunitThread;
 };
 #endif // MAINWINDOW_H

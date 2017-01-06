@@ -1,4 +1,5 @@
-
+#ifndef HU_UTI_H
+#define HU_UTI_H
 //#ifndef UTILS_INCLUDED
 
 //  #define UTILS_INCLUDED
@@ -106,6 +107,12 @@ int hu_log(int prio, const char *tag, const char *func, const char *fmt, ...);
 
 unsigned long ms_get();
 unsigned long ms_sleep(unsigned long ms);
+
+typedef struct {
+  char privateKey_file[4096];
+  char certificate_file[4096];
+} hu_settings_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -116,6 +123,9 @@ char *aud_read_head_buf_get(int *len);
 char *state_get(int state);
 void hex_dump(char *prefix, int width, unsigned char *buf, int len);
 typedef unsigned char byte;
+
+extern hu_settings_t hu_settings;// = {"hu.key","hu.crt"};
+void hu_set_settings(char *pk,char *cert);
 #ifdef __cplusplus
 }
 #endif
@@ -145,19 +155,14 @@ extern int aud_buf_buf_head; // Head is next index for reader to read from.
 
 #define USB_VID_HTC 0x0bb4
 #define USB_VID_MOT 0x22b8
-
 #define USB_VID_SAM 0x04e8
 #define USB_VID_O1A 0xfff6 // Samsung ?
-
 #define USB_VID_SON 0x0fce
 #define USB_VID_LGE 0xfff5
-
 #define USB_VID_LIN 0x1d6b
 #define USB_VID_QUA 0x05c6
 #define USB_VID_COM 0x1519 // Comneon
-
 #define USB_VID_ASE 0x0835 // Action Star Enterprise
-
 //#define USB_PID_OM8 0x0f87
 //#define USB_PID_MOG 0x2e76
 
@@ -174,3 +179,4 @@ extern int aud_buf_buf_head; // Head is next index for reader to read from.
 #define S_IRWXO 0000007 /* RWX mask for other */
 
 //#endif  //#ifndef UTILS_INCLUDED
+#endif // HU_UTI_H

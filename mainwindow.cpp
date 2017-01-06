@@ -4,6 +4,10 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow) {
   ui->setupUi(this);
+
+
+  QStringList arguments = QCoreApplication::arguments();
+
   connect(ui->pushButton, SIGNAL(released()), this, SLOT(huButtonClick()));
   connect(ui->aa_video, SIGNAL(mousePressed(QPoint *)), this,
           SLOT(huVideoClick(QPoint *)));
@@ -17,14 +21,6 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow() { delete ui; }
 bool MainWindow::huButtonClick() {
-  /*if(headunitThread->threadRun){
-      headunitThread->threadRun = false;
-      ui->pushButton->setText("Start HU");
-  } else {
-      headunitThread->threadRun = true;
-      headunitThread->start();
-      ui->pushButton->setText("Stop HU");
-  }*/
 
   aa_gst(ui->aa_video);
 

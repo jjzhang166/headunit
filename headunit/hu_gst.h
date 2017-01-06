@@ -82,6 +82,13 @@ typedef enum {
 
 } HU_INPUT_BUTTON;
 
+typedef struct {
+    bool mic_enabled;
+    char alsa_input[1024];
+    char alsa_output[1024];
+} hu_gst_settings_t;
+
+
 static const uint8_t ts_header[] = {0x80, 0x01, 0x08};
 static const uint8_t ts_sizes[] = {0x1a, 0x09, 0x0a, 0x03};
 static const uint8_t ts_footer[] = {0x10, 0x00, 0x18};
@@ -91,6 +98,7 @@ static const int max_size = 8192;
 static int shouldRead = FALSE;
 static int shouldReadAudio = FALSE;
 static gst_app_t gst_app;
+
 
 void queueSend(int retry, int chan, unsigned char *cmd_buf, int cmd_len,
                int shouldFree);
@@ -120,6 +128,7 @@ extern "C" {
 #endif
 int aa_gst(void *widget);
 void aa_touch_event(uint8_t action, int x, int y);
+void hu_gst_set_settings(bool mic_enabled,char *alsa_input,char *alsa_output);
 #ifdef __cplusplus
 }
 #endif

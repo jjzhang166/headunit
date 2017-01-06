@@ -4,20 +4,37 @@ int nightmode = 0;
 int displayStatus = 1;
 int mic_change_state = 0;
 
+hu_gst_settings_t hu_gst_settings = {true,"default","default"};
+
 GAsyncQueue *sendqueue;
 
 GMainLoop *mainloop;
 mycommander mCommander = {0, 0};
 mytouchscreen mTouch = {0, 0, 0, 0, 0};
 
+
+void hu_gst_set_settings(bool mic_enabled,char *alsa_input,char *alsa_output){
+  if(mic_enabled){
+    hu_gst_settings.mic_enabled = true;
+  } else {
+    hu_gst_settings.mic_enabled = false;
+  }
+  if( strcmp(alsa_input, "")){
+    strcpy(hu_gst_settings.alsa_input,alsa_input);
+  }
+  if(strcmp(alsa_output, "")){
+    strcpy(hu_gst_settings.alsa_output,alsa_output);
+  }
+}
+
 void queueSend(int retry, int chan, unsigned char *cmd_buf, int cmd_len,
                int shouldFree) {
-  send_arg *cmd = malloc(sizeof(send_arg));
+  send_arg *cmd = (send_arg *)malloc(sizeof(send_arg));
 
-  if (chan == AA_CH_MIC)
+  /*if (chan == AA_CH_MIC)
     g_print("sent mic buffer length:%d\n"
             "-----------------------------------------------------------\n",
-            (int)sizeof(cmd_buf));
+            (int)sizeof(cmd_buf));*/
 
   cmd->retry = retry;
   cmd->chan = chan;
@@ -180,6 +197,7 @@ static gboolean bus_callback(GstBus *bus, GstMessage *message, gpointer *ptr) {
 }
 
 static int gst_pipeline_init(gst_app_t *app, void *widget) {
+
   GstBus *bus;
   GstStateChangeReturn state_ret;
 
@@ -219,13 +237,17 @@ static int gst_pipeline_init(gst_app_t *app, void *widget) {
       "appsrc name=musicsrc is-live=true block=false blocksize=8192 ! "
       "audio/x-raw, signed=true, endianness=1234, "
       "depth=16, width=16, rate=48000, channels=2, format=S16LE ! "
-      "alsasink",
+      "alsasink name=alsa_music_sink",
       &error);
   if (error != NULL) {
     printf("could not construct pipeline: %s\n", error->message);
     g_clear_error(&error);
     return -1;
   }
+  GstAppSrc *music_sink = (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->musicpipeline), "alsa_music_sink");
+  printf("\nalsa_output = %s\n", hu_gst_settings.alsa_output);
+  g_object_set(G_OBJECT(music_sink), "device", hu_gst_settings.alsa_output, NULL);
+  gst_object_unref(music_sink);
 
   app->musicsrc =
       (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->musicpipeline), "musicsrc");
@@ -236,7 +258,7 @@ static int gst_pipeline_init(gst_app_t *app, void *widget) {
       "appsrc name=voicesrc is-live=true block=false max-latency=1000000 ! "
       "audio/x-raw, signed=true, endianness=1234, "
       "depth=16, width=16, rate=16000, channels=1, format=S16LE ! "
-      "alsasink",
+      "alsasink name=alsa_voice_sink",
       &error);
 
   if (error != NULL) {
@@ -245,16 +267,24 @@ static int gst_pipeline_init(gst_app_t *app, void *widget) {
     return -1;
   }
 
+  GstAppSrc *voice_sink = (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->voicepipeline), "alsa_voice_sink");
+  g_object_set(G_OBJECT(voice_sink), "device", hu_gst_settings.alsa_output, NULL);
+  gst_object_unref(voice_sink);
+
   app->voicesrc =
       (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->voicepipeline), "voicesrc");
 
   gst_app_src_set_stream_type(app->voicesrc, GST_APP_STREAM_TYPE_STREAM);
 
   app->micpipeline = (GstPipeline *)gst_parse_launch(
-      "alsasrc name=micsrc ! audioconvert ! audio/x-raw, signed=true, "
+      "alsasrc name=alsa_mic_sink ! audioconvert ! audio/x-raw, signed=true, "
       "endianness=1234, depth=16, width=16, channels=1, rate=16000 ! queue ! "
       "appsink name=micsink async=false emit-signals=true blocksize=8192",
       &error);
+
+  GstAppSrc *mic_src = (GstAppSrc *)gst_bin_get_by_name(GST_BIN(app->micpipeline), "alsa_mic_sink");
+  g_object_set(G_OBJECT(mic_src), "device", hu_gst_settings.alsa_input, NULL);
+  gst_object_unref(mic_src);
 
   if (error != NULL) {
     printf("could not construct mic pipeline: %s\n", error->message);
@@ -578,6 +608,8 @@ static void signals_handler(int signum) {
 }
 int aa_gst(void *widget) {
   signal(SIGTERM, signals_handler);
+  hu_gst_settings_t * temp = &hu_gst_settings;
+  printf("alsa_output = %s\n", temp->alsa_output);
 
   gst_app_t *app = &gst_app;
   int ret = 0;
