@@ -36,31 +36,8 @@ FORMS    += mainwindow.ui
 INCLUDEPATH += $$PWD/include
 DEPENDPATH += $$PWD/include
 
-#Change this when cross-compling. More info here : https://wiki.debian.org/Multiarch/Tuples
-TUPLE = $$system(if hash "gcc" 2>/dev/null; then gcc -print-multiarch; else dpkg-architecture -qDEB_HOST_MULTIARCH; fi)
-
-unix: LIBS += -lssl
-unix: LIBS += -lcrypto
-unix: LIBS += -lusb-1.0
-unix: LIBS += -lglib-2.0
-unix: LIBS += -lgobject-2.0
-unix: LIBS += -lgstapp-1.0
-unix: LIBS += -lgstreamer-1.0
-unix: LIBS += -lgstapp-1.0
-unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GLib-2.0
-unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GStreamer-1.0
-unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GStreamerUi-1.0
-unix: LIBS += -L/usr/lib/$$TUPLE/lib -lQt5GStreamerUtils-1.0
-
-unix: INCLUDEPATH += /usr/include/openssl
-unix: INCLUDEPATH += /usr/include/libusb-1.0
-unix: INCLUDEPATH += /usr/lib/$$TUPLE
-unix: INCLUDEPATH += /usr/lib/$$TUPLE/glib-2.0/include
-unix: INCLUDEPATH += /usr/include/gstreamer-1.0
-unix: INCLUDEPATH += /usr/include/glib-2.0
-unix: INCLUDEPATH += /usr/local/include/Qt5GStreamer
-unix: INCLUDEPATH += /usr/lib/$$TUPLE/include/Qt5GStreamer
-unix: INCLUDEPATH += /usr/lib/$$TUPLE/glib-2.0/include
+CONFIG += link_pkgconfig
+PKGCONFIG += libssl libcrypto libusb-1.0 glib-2.0 gobject-2.0 gstreamer-1.0 gstreamer-app-1.0 Qt5GLib-2.0 Qt5GStreamer-1.0 Qt5GStreamerUi-1.0 Qt5GStreamerUtils-1.0
 
 win32: LIBS += -llibeay32MD
 win32: LIBS += -lssleay32MD
