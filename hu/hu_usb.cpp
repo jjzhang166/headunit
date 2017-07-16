@@ -30,7 +30,7 @@ static unsigned char AAP_VAL_MAN[] =  "Android";
 static unsigned char AAP_VAL_MOD[] =  "Android Auto";    // "Android Open Automotive Protocol"
 static unsigned char AAP_VAL_DESC[] =  "Android Auto";
 static unsigned char AAP_VAL_VER[] =  "2.0.1";
-static unsigned char AAP_VAL_URI[] =  "https://github.com/viktorgino/headunit-desktop";
+static unsigned char AAP_VAL_URI[] =  "https://github.com/gartnera/headunit";
 static unsigned char AAP_VAL_SERIAL[] =  "HU-AAAAAA001";
 
 #define ACC_IDX_MAN    0   // Manufacturer
